@@ -3,7 +3,7 @@
 This is only a tiny implementation.
 
 In the future when implementing an API, maybe make a doc showing a small
-scratchpad of information, using shor context windows, as you do so. Then
+scratchpad of information, using short context windows, as you do so. Then
 likely a system like langchain could be used to replicate the work
 automatically, based on the notes.
 

@@ -1,0 +1,400 @@
+horde/apis/apiv2.py
+horde/apis/
+horde/apis/v2
+horde/apis/v2/kobold.py,horde/apis/v2/v2.py
+
+this is the list of apis:
+api.add_resource(SyncGenerate, "/generate/sync")
+api.add_resource(AsyncGenerate, "/generate/async")
+api.add_resource(AsyncStatus, "/generate/status/<string:id>")
+api.add_resource(AsyncCheck, "/generate/check/<string:id>")
+api.add_resource(JobPop, "/generate/pop")
+api.add_resource(JobSubmit, "/generate/submit")
+api.add_resource(Users, "/users")
+api.add_resource(UserSingle, "/users/<string:user_id>")
+api.add_resource(FindUser, "/find_user")
+api.add_resource(Workers, "/workers")
+api.add_resource(WorkerSingle, "/workers/<string:worker_id>")
+api.add_resource(TransferKudos, "/kudos/transfer")
+api.add_resource(HordeLoad, "/status/performance")
+api.add_resource(HordeModes, "/status/modes")
+api.add_resource(Models, "/status/models")
+api.add_resource(HordeNews, "/status/news")
+api.add_resource(Heartbeat, "/status/heartbeat")
+api.add_resource(Teams, "/teams")
+api.add_resource(TeamSingle, "/teams/<string:team_id>")
+api.add_resource(OperationsIP, "/operations/ipaddr")
+each one is managed by a python class. to document and interface with each one, find the python class and convert it
+
+api.add_resource(AsyncGenerate, "/generate/async")
+03c7cc3fa05ad6af749b745b11c86d5115cec9ea horde/apis/v2/v2.py
+class AsyncGenerate(GenerateTemplate):
+
+    @api.expect(parsers.generate_parser, models.input_model_request_generation, validate=True)
+    @api.marshal_with(models.response_model_async, code=202, description='Generation Queued', skip_none=True)
+    @api.response(400, 'Validation Error', models.response_model_error)
+    @api.response(401, 'Invalid API Key', models.response_model_error)
+    @api.response(503, 'Maintenance Mode', models.response_model_error)
+    @api.response(429, 'Too Many Prompts', models.response_model_error)
+    def post(self):
+        '''Initiate an Asynchronous request to generate images.
+        This endpoint will immediately return with the UUID of the request for generation.
+        This endpoint will always be accepted, even if there are no workers available currently to fulfill this request.
+        Perhaps some will appear in the next 10 minutes.
+        Asynchronous requests live for 10 minutes before being considered stale and being deleted.
+        '''
+        try:
+            super().post()
+        except KeyError:
+            logger.error(f"caught missing Key.")
+            logger.error(self.args)
+            logger.error(self.args.params)
+            return {"message": "Internal Server Error"},500
+        ret_dict = {"id":self.wp.id}
+        if not database.wp_has_valid_workers(self.wp, self.workers) and not raid.active:
+            ret_dict['message'] = self.get_size_too_big_message()
+        return(ret_dict, 202)
+
+    def get_size_too_big_message(self):
+        return("Warning: No available workers can fulfill this request. It will expire in 10 minutes. Please confider reducing its size of the request.")
+
+This is the endpoint documentation:
+        '''Initiate an Asynchronous request to generate images.
+        This endpoint will immediately return with the UUID of the request for generation.
+        This endpoint will always be accepted, even if there are no workers available currently to fulfill this request.
+        Perhaps some will appear in the next 10 minutes.
+        Asynchronous requests live for 10 minutes before being considered stale and being deleted.
+        '''
+
+
+03c7cc3fa05ad6af749b745b11c86d5115cec9ea horde/apis/v2/v2.py
+# I have to put it outside the class as I can't figure out how to extend the argparser and also pass it to the @api.expect decorator inside the class
+class GenerateTemplate(Resource):
+    def post(self):
+        #logger.warning(datetime.utcnow())
+        self.args = parsers.generate_parser.parse_args()
+        # I have to extract and store them this way, because if I use the defaults
+        # It causes them to be a shared object from the parsers class
+        self.params = {}
+        if self.args.params:
+            self.params = self.args.params
+        self.models = []
+        if self.args.models:
+            self.models = self.args.models.copy()
+        self.workers = []
+        if self.args.workers:
+            self.workers = self.args.workers
+        self.user = None
+        self.user_ip = request.remote_addr
+        # For now this is checked on validate()
+        self.safe_ip = True
+        self.validate()
+        #logger.warning(datetime.utcnow())
+        self.initiate_waiting_prompt()
+        #logger.warning(datetime.utcnow())
+        self.activate_waiting_prompt()
+        #logger.warning(datetime.utcnow())
+
+    # We split this into its own function, so that it may be overriden and extended
+    def validate(self):
+        if maintenance.active:
+            raise e.MaintenanceMode('Generate')
+        with HORDE.app_context():  # TODO DOUBLE CHECK THIS
+            #logger.warning(datetime.utcnow())
+            if self.args.apikey:
+                self.user = database.find_user_by_api_key(self.args['apikey'])
+            #logger.warning(datetime.utcnow())
+            if not self.user:
+                raise e.InvalidAPIKey('generation')
+            self.username = self.user.get_unique_alias()
+            #logger.warning(datetime.utcnow())
+            #logger.warning(datetime.utcnow())
+            if self.args['prompt'] == '':
+                raise e.MissingPrompt(self.username)
+            if self.user.is_anon():
+                wp_count = database.count_waiting_requests(self.user,self.args["models"])
+                #logger.warning(datetime.utcnow())
+            else:
+                wp_count = database.count_waiting_requests(self.user)
+                #logger.warning(datetime.utcnow())
+            if len(self.workers):
+                for worker_id in self.workers:
+                    if not database.worker_exists(worker_id):
+                        raise e.WorkerNotFound(worker_id)
+            #logger.warning(datetime.utcnow())
+            n = 1
+            if self.args.params:
+                n = self.args.params.get('n',1)
+            user_limit = self.user.get_concurrency(self.args["models"],database.retrieve_available_models)
+            #logger.warning(datetime.utcnow())
+            if wp_count + n > user_limit:
+                raise e.TooManyPrompts(self.username, wp_count + n, user_limit)
+            ip_timeout = CounterMeasures.retrieve_timeout(self.user_ip)
+            #logger.warning(datetime.utcnow())
+            if ip_timeout:
+                raise e.TimeoutIP(self.user_ip, ip_timeout)
+            #logger.warning(datetime.utcnow())
+            prompt_suspicion, _ = prompt_checker(self.args.prompt)
+            #logger.warning(datetime.utcnow())
+            if prompt_suspicion >= 2:
+                # Moderators do not get ip blocked to allow for experiments
+                if not self.user.moderator:
+                    prompt_dict = {
+                        "prompt": self.args.prompt,
+                        "user": self.username,
+                    }
+                    upload_prompt(prompt_dict)
+                    self.user.report_suspicion(1,Suspicions.CORRUPT_PROMPT)
+                    CounterMeasures.report_suspicion(self.user_ip)
+                raise e.CorruptPrompt(self.username, self.user_ip, self.args.prompt)
+            if prompt_checker.check_nsfw_model_block(self.args.prompt, self.models):
+                raise e.CorruptPrompt(self.username, self.user_ip, self.args.prompt, message = "To prevent generation of unethical images, we cannot allow this prompt with NSFW models. Please select another model and try again.")
+
+
+
+    # We split this into its own function, so that it may be overriden
+    def initiate_waiting_prompt(self):
+        self.wp = WaitingPrompt(
+            self.workers,
+            self.models,
+            prompt = self.args["prompt"],
+            user_id = self.user.id,
+            params = self.params,
+            nsfw = self.args.nsfw,
+            censor_nsfw = self.args.censor_nsfw,
+            trusted_workers = self.args.trusted_workers,
+            ipaddr = self.user_ip,
+        )
+
+    # We split this into its own function, so that it may be overriden and extended
+    def activate_waiting_prompt(self):
+        self.wp.activate()
+
+The endpoint is POST.
+
+This is the endpoint documentation:
+        '''Initiate an Asynchronous request to generate images.
+        This endpoint will immediately return with the UUID of the request for generation.
+        This endpoint will always be accepted, even if there are no workers available currently to fulfill this request.
+        Perhaps some will appear in the next 10 minutes.
+        Asynchronous requests live for 10 minutes before being considered stale and being deleted.
+        '''
+
+this is the list of url parameters:
+        self.params = {}
+        if self.args.params:
+            self.params = self.args.params
+        self.models = []
+        if self.args.models:
+            self.models = self.args.models.copy()
+        self.workers = []
+        if self.args.workers:
+            self.workers = self.args.workers
+
+            if self.args.apikey:
+                self.user = database.find_user_by_api_key(self.args['apikey'])
+            #logger.warning(datetime.utcnow())
+            if not self.user:
+                raise e.InvalidAPIKey('generation')
+            if self.user.is_anon():
+                wp_count = database.count_waiting_requests(self.user,self.args["models"])
+
+            n = 1
+            if self.args.params:
+                n = self.args.params.get('n',1)
+
+        self.wp = WaitingPrompt(
+            self.workers,
+            self.models,
+            prompt = self.args["prompt"],
+            user_id = self.user.id,
+            params = self.params,
+            nsfw = self.args.nsfw,
+            censor_nsfw = self.args.censor_nsfw,
+            trusted_workers = self.args.trusted_workers,
+            ipaddr = self.user_ip,
+        )
+
+this is the list of errors:
+                raise e.InvalidAPIKey('generation')
+                raise e.TooManyPrompts(self.username, wp_count + n, user_limit)
+                raise e.TimeoutIP(self.user_ip, ip_timeout)
+                raise e.CorruptPrompt(self.username, self.user_ip, self.args.prompt)
+                raise e.CorruptPrompt(self.username, self.user_ip, self.args.prompt, message = "To prevent generation of unethical images, we cannot allow this prompt with NSFW models. Please select another model and try again.")
+
+03c7cc3fa05ad6af749b745b11c86d5115cec9ea horde/apis/v2/v2.py
+from horde.classes import stats, Worker, Team, WaitingPrompt, News, User, Filter
+
+horde/classes/
+horde/classes/__init__.py
+horde/classes/kobold/
+horde/classes/kobold/__init__.py
+
+this is further information on the url parameters: (from __init__.py)
+        self.n = params.pop('n', 1)
+        self.steps = params.pop('steps', 50)
+        if self.n > 20:
+            logger.warning(f"User {self.user.get_unique_alias()} requested {self.n} gens per action. Reducing to 20...")
+            self.n = 20
+        self.max_length = params.get("max_length", 80)
+        self.max_content_length = params.get("max_content_length", 1024)
+        self.models = kwargs.get("models", ['ReadOnly'])
+
+from horde.classes.base.waiting_prompt import WaitingPrompt
+horde/classes/base/
+horde/classes/base/waiting_prompt.py
+
+The endpoint is POST.
+
+this is the list of url parameters:
+        self.params = {}
+        if self.args.params:
+            self.params = self.args.params
+        self.models = []
+        if self.args.models:
+            self.models = self.args.models.copy()
+        self.workers = []
+        if self.args.workers:
+            self.workers = self.args.workers
+
+            if self.args.apikey:
+                self.user = database.find_user_by_api_key(self.args['apikey'])
+            #logger.warning(datetime.utcnow())
+            if not self.user:
+                raise e.InvalidAPIKey('generation')
+            if self.user.is_anon():
+                wp_count = database.count_waiting_requests(self.user,self.args["models"])
+
+        self.wp = WaitingPrompt(
+            self.workers,
+            self.models,
+            prompt = self.args["prompt"],
+            user_id = self.user.id,
+            params = self.params,
+            nsfw = self.args.nsfw,
+            censor_nsfw = self.args.censor_nsfw,
+            trusted_workers = self.args.trusted_workers,
+            ipaddr = self.user_ip,
+        )
+
+        self.models = kwargs.get("models", ['ReadOnly'])
+
+the params url parameter contains further parameters:
+            n = 1
+            if self.args.params:
+                n = self.args.params.get('n',1)
+
+        self.n = params.pop('n', 1)
+        self.steps = params.pop('steps', 50)
+        if self.n > 20:
+            logger.warning(f"User {self.user.get_unique_alias()} requested {self.n} gens per action. Reducing to 20...")
+            self.n = 20
+        self.max_length = params.get("max_length", 80)
+        self.max_content_length = params.get("max_content_length", 1024)
+
+this is the list of errors:
+                raise e.InvalidAPIKey('generation')
+                raise e.TooManyPrompts(self.username, wp_count + n, user_limit)
+                raise e.TimeoutIP(self.user_ip, ip_timeout)
+                raise e.CorruptPrompt(self.username, self.user_ip, self.args.prompt)
+                raise e.CorruptPrompt(self.username, self.user_ip, self.args.prompt, message = "To prevent generation of unethical images, we cannot allow this prompt with NSFW models. Please select another model and try again.")
+
+## the behavior to do this ended up being more complex than i expected.
+## details on the post data and the error code mapping are not included above
+#### it might be a little simpler cognitively with an example scratchpad; more direct translation
+############### good practice !
+
+further snippet notes:
+    @api.expect(parsers.generate_parser, models.input_model_request_generation, validate=True)
+    @api.marshal_with(models.response_model_async, code=202, description='Generation Queued', skip_none=True)
+    @api.response(400, 'Validation Error', models.response_model_error)
+    @api.response(401, 'Invalid API Key', models.response_model_error)
+    @api.response(503, 'Maintenance Mode', models.response_model_error)
+    @api.response(429, 'Too Many Prompts', models.response_model_error)
+
+horde/apis/models/kobold_v2.py
+        self.generate_parser.add_argument("softprompts", type=list, required=False, help="If specified, only servers who can load this softprompt will generate this request", location="json")
+        self.generate_parser.add_argument("models", type=list, required=False, default=[], help="The acceptable models with which to generate", location="json")
+        self.job_pop_parser.add_argument("max_length", type=int, required=False, default=512, help="The maximum amount of tokens this worker can generate", location="json")
+        self.job_pop_parser.add_argument("max_content_length", type=int, required=False, default=2048, help="The max amount of context to submit to this AI for sampling.", location="json")
+        self.job_pop_parser.add_argument("softprompts", type=list, required=False, help="The available softprompt files on this worker for the currently running model", location="json")
+        # To remove the below once I updated the KAI server to use "models"
+        self.job_pop_parser.add_argument("model", type=str, required=False, help="The model currently available on this worker", location="json")
+        self.job_submit_parser.add_argument("seed", type=str, required=False, default='', help="The seed of the generation", location="json")
+horde/apis/models/v2.py
+    generate_parser = reqparse.RequestParser()
+    generate_parser.add_argument("apikey", type=str, required=True, help="The API Key corresponding to a registered user", location='headers')
+    generate_parser.add_argument("Client-Agent", default="unknown:0:unknown", type=str, required=False, help="The client name and version", location="headers")
+    generate_parser.add_argument("prompt", type=str, required=True, help="The prompt to generate from", location="json")
+    generate_parser.add_argument("params", type=dict, required=False, help="Extra generate params to send to the worker", location="json")
+    generate_parser.add_argument("trusted_workers", type=bool, required=False, default=False, help="When true, only Horde trusted workers will serve this request. When False, Evaluating workers will also be used.", location="json")
+    generate_parser.add_argument("workers", type=list, required=False, help="If specified, only the worker with this ID will be able to generate this prompt", location="json")
+    generate_parser.add_argument("nsfw", type=bool, default=True, required=False, help="Marks that this request expects or allows NSFW content. Only workers with the nsfw flag active will pick this request up.", location="json")
+
+    # The parser for RequestPop
+    job_pop_parser = reqparse.RequestParser()
+    job_pop_parser.add_argument("apikey", type=str, required=True, help="The API Key corresponding to a registered user", location='headers')
+    job_pop_parser.add_argument("name", type=str, required=True, help="The worker's unique name, to track contributions", location="json")
+    job_pop_parser.add_argument("priority_usernames", type=list, required=False, help="The usernames which get priority use on this worker", location="json")
+    job_pop_parser.add_argument("nsfw", type=bool, default=True, required=False, help="Marks that this worker is capable of generating NSFW content", location="json")
+    job_pop_parser.add_argument("blacklist", type=list, required=False, help="Specifies the words that this worker will not accept in a prompt.", location="json")
+    job_pop_parser.add_argument("models", type=list, required=False, help="The models currently available on this worker", location="json")
+    job_pop_parser.add_argument("bridge_version", type=int, required=False, default=1, help="Specify the version of the worker bridge, as that can modify the way the arguments are being sent", location="json")
+    job_pop_parser.add_argument("bridge_agent", type=str, required=False, default="unknown:0:unknown", location="json")
+    job_pop_parser.add_argument("threads", type=int, required=False, default=1, help="How many threads this worker is running. This is used to accurately the current power available in the horde", location="json")
+    job_pop_parser.add_argument("require_upfront_kudos", type=bool, required=False, default=False, help="If True, this worker will only pick up requests where the owner has the required kudos to consume already available.", location="json")
+
+    job_submit_parser = reqparse.RequestParser()
+    job_submit_parser.add_argument("apikey", type=str, required=True, help="The worker's owner API key", location='headers')
+    job_submit_parser.add_argument("id", type=str, required=True, help="The processing generation uuid", location="json")
+    job_submit_parser.add_argument("generation", type=str, required=True, help="The generated output", location="json")
+    job_submit_parser.add_argument("state", type=str, required=False, default='ok', help="The state of this returned generation.", location="json")
+
+
+
+### i'm thinking something like "this is a work-in-progress api function"
+### "this is a snippet of data from [context]"
+### "if there is anything useful in the snippet of data, write a new api function including it below"
+### "if it is not yet clear how it is useful, add notes so it can be used later"
+#### maybe "here is an example"
+
+async def generate_async(
+    self,
+    prompt,
+    softprompts = None,
+    n = 1,
+    steps = 50,
+    max_length = 80,
+    max_content_length = 1024,
+    models = None,
+    workers = None,
+    trusted_workers = None,
+    nsfw = None,
+    censor_nsfw = None,
+):
+    # find type of data, is it url or body?
+    # enumerate errors
+    '''Initiate an Asynchronous request to generate images.
+    This endpoint will immediately return with the UUID of the request for generation.
+    This endpoint will always be accepted, even if there are no workers available currently to fulfill this request.
+    Perhaps some will appear in the next 10 minutes.
+    Asynchronous requests live for 10 minutes before being considered stale and being deleted.
+    '''
+    assert n <= 20
+    await self.post('/generate/async', dict(
+        # self.post will also need to provide the apikey parameter
+        prompt = prompt,
+        nsfw = nsfw,
+        censor_nsfw = censor_nsfw,
+        models = models,
+        workers = workers,
+        trusted_workers = trusted_workers,
+        params = dict(
+            n = n,
+            steps = steps,
+            max_length = max_length,
+            max_content_length = max_content_length,
+        ),
+    ))
+# there are a lot of parameters
+
